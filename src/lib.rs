@@ -3,21 +3,21 @@ use std::cell::{BorrowMutError, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub trait ResourceTrait: Any {
+pub trait EntityTrait: Any {
     fn as_any(&self) -> &dyn Any;
 
-    fn child(&self, name: &str) -> Option<Rc<dyn ResourceTrait>> {
+    fn child(&self, name: &str) -> Option<Rc<dyn EntityTrait>> {
         None
     }
 }
 
-pub type Resource = Rc<dyn ResourceTrait>;
+pub type Entity = Rc<dyn EntityTrait>;
 
 #[derive(Clone)]
 struct InnerNode {
     name: Rc<String>,
     parent: Option<Node>,
-    resource: Resource,
+    entity: Entity,
 }
 
 #[derive(Clone)]
@@ -26,12 +26,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(name: &str, parent: Option<Node>, resource: Resource) -> Self {
+    pub fn new(name: &str, parent: Option<Node>, entity: Entity) -> Self {
         Self {
             inner: Rc::new(InnerNode {
                 name: Rc::new(name.to_string()),
                 parent,
-                resource,
+                entity,
             }),
         }
     }
@@ -44,12 +44,12 @@ impl Node {
         self.inner.parent.clone()
     }
 
-    pub fn resource(&self) -> Resource {
-        self.inner.resource.clone()
+    pub fn entity(&self) -> Entity {
+        self.inner.entity.clone()
     }
 
-    pub fn resource_type_id(&self) -> TypeId {
-        self.resource().as_any().type_id()
+    pub fn entity_type_id(&self) -> TypeId {
+        self.entity().as_any().type_id()
     }
 
     pub fn path(&self) -> String {
@@ -59,43 +59,46 @@ impl Node {
             names.push(p.name().to_string());
             parent = p.parent();
         }
+        if names.len() == 1 {
+            names.push("".to_string());
+        }
         names.reverse();
         names.join("/")
     }
 
     pub fn child(&self, name: &str) -> Option<Node> {
-        let child = self.inner.resource.child(name);
+        let child = self.inner.entity.child(name);
         child.map(|resource| Node::new(name, Some(self.clone()), resource))
     }
 }
 
-trait Apply: ResourceTrait {
+trait Apply: EntityTrait {
     fn apply<F, R>(node: &Node, f: F) -> Option<R>
-    where
-        F: FnOnce(&Self) -> R;
+        where
+            F: FnOnce(&Self) -> R;
 
     fn inside_node(node: &Node) -> bool {
-        node.resource_type_id() == TypeId::of::<Self>()
+        node.entity_type_id() == TypeId::of::<Self>()
     }
 }
 
-impl<T: ResourceTrait> Apply for T {
+impl<T: EntityTrait> Apply for T {
     fn apply<F, R>(node: &Node, f: F) -> Option<R>
-    where
-        F: FnOnce(&Self) -> R,
+        where
+            F: FnOnce(&Self) -> R,
     {
-        let resource = node.resource();
-        resource.as_any().downcast_ref::<T>().map(f)
+        let entity = node.entity();
+        entity.as_any().downcast_ref::<T>().map(f)
     }
 }
 
 #[derive(Default)]
 pub struct SimpleContainer {
-    pub children: RefCell<HashMap<String, Resource>>,
+    pub children: RefCell<HashMap<String, Entity>>,
 }
 
 impl SimpleContainer {
-    pub fn set_child<T: ResourceTrait + 'static>(
+    pub fn set_child<T: EntityTrait + 'static>(
         &self,
         name: &str,
         child: T,
@@ -108,27 +111,39 @@ impl SimpleContainer {
     }
 }
 
-impl ResourceTrait for SimpleContainer {
+impl EntityTrait for SimpleContainer {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn child(&self, name: &str) -> Option<Resource> {
+    fn child(&self, name: &str) -> Option<Entity> {
         self.children.borrow().get(name).cloned()
     }
 }
 
-pub fn traverse(node: &Node, path: &str) -> Result<Node, String> {
-    let mut result_node = node.clone();
-    for name in path.split('/').filter(|n| !n.is_empty()) {
-        result_node = match result_node.child(name) {
-            Some(node) => node,
-            None => {
-                return Err("not found".to_string());
+/// Finds a node with given path by traversing a node hierarchy.
+pub fn traverse<'p>(root_node: &Node, mut path: &'p str) -> (Node, &'p str) {
+    let mut result_node = root_node.clone();
+    path = path.trim_matches('/');
+    while !path.is_empty() {
+         match path.split_once('/') {
+            Some((name, tail)) => {
+                result_node = match result_node.child(name) {
+                    Some(node) => node,
+                    None => break
+                };
+                path = tail;
+            },
+            None =>  {
+                if let Some(node) =  result_node.child(path) {
+                    result_node = node;
+                    path = "";
+                }
+                break
             }
         }
     }
-    Ok(result_node)
+    (result_node, path)
 }
 
 #[cfg(test)]
@@ -165,10 +180,16 @@ mod tests {
         let sub_sub_child = sub_child1.child("sub_sub_child").unwrap();
         assert_eq!(sub_sub_child.path(), "/child1/sub_child1/sub_sub_child");
 
-        let sub_sub_child = traverse(&root_node, "/child1/sub_child1/sub_sub_child");
-        assert!(sub_sub_child.is_ok());
-        if let Ok(node) = sub_sub_child {
-            assert_eq!(node.path(), "/child1/sub_child1/sub_sub_child");
-        }
+        let (node, path_tail) = traverse(&root_node, "/child1/sub_child1/sub_sub_child");
+        assert_eq!(path_tail, "");
+        assert_eq!(node.path(), "/child1/sub_child1/sub_sub_child");
+
+        let (node, path_tail) = traverse(&root_node, "/child1/unknown/child");
+        assert_eq!(node.path(), "/child1");
+        assert_eq!(path_tail, "unknown/child");
+
+        let (node, path_tail) = traverse(&root_node, "/");
+        assert_eq!(node.path(), "/");
+        assert_eq!(path_tail, "");
     }
 }
